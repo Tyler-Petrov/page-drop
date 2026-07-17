@@ -1,0 +1,20 @@
+{
+  "name": "page-drop",
+  "version": "0.1.0",
+  "description": "Publish standalone HTML pages to Cloudflare R2 from the command line",
+  "type": "module",
+  "bin": {
+    "pagedrop": "./pagedrop.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check pagedrop.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1090.0"
+  }
+}
