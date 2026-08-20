@@ -1,20 +1,36 @@
 {
   "name": "page-drop",
-  "version": "0.1.0",
-  "description": "Publish standalone HTML pages to Cloudflare R2 from the command line",
+  "version": "0.2.0",
+  "description": "Publish and update public files in your own Cloudflare R2 bucket",
   "type": "module",
   "bin": {
-    "pagedrop": "./pagedrop.js"
+    "pagedrop": "bin/pagedrop.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check pagedrop.js"
+    "check": "node --check bin/pagedrop.js && node --check src/cli.js",
+    "prepack": "npm test && npm run check"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
-  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tyler-Petrov/page-drop.git"
+  },
+  "homepage": "https://github.com/Tyler-Petrov/page-drop#readme",
+  "bugs": "https://github.com/Tyler-Petrov/page-drop/issues",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1090.0"
+    "diff": "9.0.0",
+    "mime-types": "3.0.2",
+    "wrangler": "4.125.0"
   }
 }

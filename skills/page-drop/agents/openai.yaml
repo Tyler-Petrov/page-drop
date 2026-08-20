@@ -1,0 +1,7 @@
+interface:
+  display_name: "Page Drop"
+  short_description: "Publish and update standalone public files"
+  default_prompt: "Use $page-drop to publish this as a standalone public file."
+
+policy:
+  allow_implicit_invocation: true
