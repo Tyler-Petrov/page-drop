@@ -4,15 +4,16 @@ Page Drop is a small CLI for publishing public files to your own Cloudflare R2 b
 
 The CLI is the product. The skill teaches an agent how to use it.
 
-Page Drop keeps no local copy of uploaded files and stores no Cloudflare API key. It uses Wrangler's browser login and asks Wrangler for the current auto-refreshed token only when making a request. Its config contains only the Cloudflare account ID, bucket name, public URL, and jurisdiction.
+Page Drop keeps no local copy of uploaded files. It authenticates with one Cloudflare API token read from your home directory `.env` or `.env.local`, and its config file contains only the Cloudflare account ID, bucket name, public URL, and jurisdiction.
 
 ## Requirements
 
 - Node.js 22 or newer
 - A Cloudflare account
 - R2 enabled on that account
+- A Cloudflare API token with the **Workers R2 Storage: Edit** permission
 
-Cloudflare may require a one-time R2 subscription checkout. The agent can perform the rest of setup, but it cannot accept that checkout or complete browser authentication for you.
+Cloudflare may require a one-time R2 subscription checkout. The agent can perform the rest of setup, but it cannot accept that checkout or create the API token for you.
 
 ## Install
 
@@ -38,13 +39,20 @@ That command copies only the packaged skill to `~/.agents/skills/page-drop`. It 
 
 ## First-Time Setup
 
-Start Cloudflare's browser login:
+Create an API token at <https://dash.cloudflare.com/profile/api-tokens> with the **Workers R2 Storage: Edit** permission, then store it:
 
 ```bash
 pagedrop login
 ```
 
-For a remote shell, use `pagedrop login --device`. Page Drop proxies its pinned Wrangler dependency with keyring storage enabled.
+That prompts for the token without echoing it and writes `PAGE_DROP_API_TOKEN=...` to `~/.env.local`, creating the file with `600` permissions. It rewrites only that one assignment and leaves every other line alone. Non-interactive alternatives:
+
+```bash
+pagedrop login --token "$CLOUDFLARE_API_TOKEN"   # visible to other processes and shell history
+cat token.txt | pagedrop login
+```
+
+You can skip `pagedrop login` entirely and manage the file yourself.
 
 Create or reuse the `page-drop` bucket, enable its public `r2.dev` address, and save non-secret config:
 
@@ -52,7 +60,7 @@ Create or reuse the `page-drop` bucket, enable its public `r2.dev` address, and 
 pagedrop setup
 ```
 
-If the Cloudflare login has more than one account, choose one explicitly:
+If the token can reach more than one account, choose one explicitly:
 
 ```bash
 pagedrop setup --account ACCOUNT_ID
@@ -76,13 +84,27 @@ pagedrop status
 pagedrop status --json
 ```
 
+## Where The Token Comes From
+
+Page Drop looks for `PAGE_DROP_API_TOKEN`, then `CLOUDFLARE_API_TOKEN`, in this order:
+
+1. The process environment
+2. `~/.env`
+3. `~/.env.local`
+
+Later sources win, so `~/.env.local` overrides `~/.env`, and an exported shell variable overrides both. Set `PAGE_DROP_ENV_FILE` to read one specific file instead of the two home-directory defaults. Page Drop reads only the keys it needs and never loads the rest of the file into its environment.
+
+`PAGE_DROP_ACCOUNT_ID` or `CLOUDFLARE_ACCOUNT_ID` from the same sources supplies the default `--account` for `pagedrop setup`. A token scoped to a single account may not be allowed to list accounts; pass `--account <id>` in that case.
+
+Keep the file private: `chmod 600 ~/.env.local`. `pagedrop status` warns when the file granting the token is readable by other users.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `pagedrop login [--device]` | Opens Cloudflare OAuth through the packaged Wrangler and stores its refreshable session in the OS keyring. |
+| `pagedrop login [--token <token>]` | Stores a Cloudflare API token as `PAGE_DROP_API_TOKEN` in `~/.env.local`. Prompts without echo, or reads the token from stdin. |
 | `pagedrop setup` | Selects an account, creates or reuses a bucket, enables its `r2.dev` public address, and writes non-secret config. |
-| `pagedrop status [--json]` | Reports whether Wrangler is authenticated and Page Drop is configured. |
+| `pagedrop status [--json]` | Reports which variable and file supplied the token, whether Cloudflare still accepts it, and whether Page Drop is configured. It never prints the token. |
 | `pagedrop publish <html\|-> [key] [--key <key>]` | Uploads HTML from a file or stdin with an HTML content type. |
 | `pagedrop put <file\|-> [key] [--key <key>]` | Uploads any single file and infers its MIME type. Use `--content-type` for stdin or an override. |
 | `pagedrop list [--json]` | Lists remote object keys, sizes, and public URLs. |
@@ -91,7 +113,7 @@ pagedrop status --json
 | `pagedrop update <key> --edits <file\|->` | Applies checked structured edits in memory and uploads only if every edit succeeds. |
 | `pagedrop delete <key> --yes` | Permanently deletes one exact key. |
 | `pagedrop skill install` | Installs or updates the packaged skill in the shared cross-agent skill directory. |
-| `pagedrop logout --yes` | Logs out the shared Wrangler session; other Wrangler-based tools are affected too. |
+| `pagedrop logout --yes` | Removes the `PAGE_DROP_API_TOKEN` line from `~/.env` and `~/.env.local`. It does not revoke the token at Cloudflare. |
 
 `pagedrop page.html pages/example.html` remains a shorthand for `pagedrop publish page.html --key pages/example.html`.
 
@@ -135,7 +157,7 @@ Structured updates work only for text content. Replace a binary file with `paged
 
 ## Safety
 
-Every uploaded object is public through the configured base URL. Page Drop refuses common secret filenames such as `.env`, `credentials.json`, private keys, and certificate bundles. `--allow-sensitive` bypasses the check and should be used only when public exposure is intentional.
+Every uploaded object is public through the configured base URL. Page Drop refuses common secret filenames such as `.env`, `credentials.json`, private keys, and certificate bundles, which includes the very file that holds your API token. `--allow-sensitive` bypasses the check and should be used only when public exposure is intentional.
 
 `r2.dev` is a rate-limited development URL. Use a custom domain for regular traffic.
 
@@ -148,4 +170,4 @@ npm run check
 npm pack
 ```
 
-Tests use a local fake Cloudflare API and fake Wrangler output. They do not read your Wrangler session or modify R2.
+Tests use a local fake Cloudflare API and a temporary home directory. They never read your real token or modify R2.

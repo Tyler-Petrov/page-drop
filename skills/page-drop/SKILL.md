@@ -15,13 +15,15 @@ Run:
 pagedrop status --json
 ```
 
-If authentication is missing, ask the user to complete the browser step started by:
+If authentication is missing, ask the user to create a Cloudflare API token with the **Workers R2 Storage: Edit** permission at <https://dash.cloudflare.com/profile/api-tokens>, then have them store it themselves:
 
 ```bash
 pagedrop login
 ```
 
-Then run `pagedrop setup`. If more than one Cloudflare account is available, show the choices from the error and pass the user's choice with `--account`. Do not request or create an R2 access key. Wrangler owns and refreshes the OAuth session; Page Drop stores only non-secret account, bucket, and public URL settings.
+That prompts without echoing and saves `PAGE_DROP_API_TOKEN` to the user's `~/.env.local`. Never ask the user to paste the token into the chat, and never pass one with `pagedrop login --token`; both would put the secret in the transcript or shell history. If the user keeps a token in `~/.env` or `~/.env.local` already, Page Drop picks it up with no further setup.
+
+Then run `pagedrop setup`. If more than one Cloudflare account is available, show the choices from the error and pass the user's choice with `--account`. A token scoped to one account may be denied the account list; pass `--account <id>` in that case. Page Drop stores only non-secret account, bucket, and public URL settings in its own config.
 
 ## Publish
 

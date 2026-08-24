@@ -1,4 +1,4 @@
-import { authHeaders } from "./wrangler.js";
+import { authHeaders } from "./auth.js";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -54,6 +54,29 @@ export class CloudflareR2 {
     const data = await response.json();
     if (data.success === false) throw new Error(data.errors?.map((error) => error.message).join("; ") || "Cloudflare API request failed");
     return data;
+  }
+
+  // Account and token endpoints are not bucket-scoped, so they bypass bucketUrl().
+  async accounts() {
+    const found = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const url = new URL(`${this.apiBase}/accounts`);
+      url.searchParams.set("per_page", "50");
+      url.searchParams.set("page", String(page));
+      const data = await this.request(url);
+      found.push(...(data.result || []));
+      const info = data.result_info;
+      if (!info?.total_pages || page >= info.total_pages) break;
+    }
+    return found
+      .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
+      .map((entry) => ({ id: entry.id, name: entry.name }))
+      .filter((entry) => typeof entry.id === "string" && entry.id.length > 0);
+  }
+
+  async verifyToken() {
+    const data = await this.request(`${this.apiBase}/user/tokens/verify`);
+    return data.result?.status === "active";
   }
 
   async createBucket() {
