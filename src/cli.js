@@ -1,14 +1,16 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
+import { apiToken, configuredAccountId, removeToken, saveToken, TOKEN_KEY, tokenFile } from "./auth.js";
 import { CloudflareR2 } from "./cloudflare.js";
 import { configPath, readConfig, validateConfig, writeConfig } from "./config.js";
 import { applyEdits, matchingLines } from "./edits.js";
 import { assertSafeFile, contentType, generatedKey, isTextContentType, publicUrl, readInput, validateKey } from "./files.js";
+import { readSecret } from "./prompt.js";
 import { installSkill } from "./skill.js";
-import { accounts, authHeaders, runWrangler } from "./wrangler.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
+const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens";
 
 function usage() {
   return `Page Drop ${VERSION}
@@ -16,7 +18,7 @@ function usage() {
 Publish and update public files in your own Cloudflare R2 bucket.
 
 Setup:
-  pagedrop login [--device]
+  pagedrop login [--token <token>]
   pagedrop setup [--account <id>] [--bucket <name>] [--public-base-url <url>]
   pagedrop status [--json]
   pagedrop logout --yes
@@ -30,6 +32,10 @@ Files:
   pagedrop inspect <key> [--match <text>] [--context <lines>]
   pagedrop update <key> --edits <file|-> [--if-etag <etag>] [--dry-run]
   pagedrop delete <key> --yes
+
+Page Drop reads a Cloudflare API token from ${TOKEN_KEY} (or CLOUDFLARE_API_TOKEN)
+in the environment, then ~/.env, then ~/.env.local. Create a token with the
+"Workers R2 Storage: Edit" permission at ${TOKEN_URL}.
 
 The shorthand \`pagedrop <file> [key]\` publishes HTML. Use --allow-sensitive only
 when intentionally making a file such as .env, credentials.json, or a key public.
@@ -63,11 +69,23 @@ function parseCommon(args) {
 }
 
 async function login(args) {
-  const device = takeOption(args, ["--device"], { boolean: true });
-  if (device.args.length) throw new Error("Usage: pagedrop login [--device]");
-  const wranglerArgs = ["login", "--use-keyring", "--scopes", "account:read", "user:read", "workers:write"];
-  if (device.value) wranglerArgs.push("--device");
-  await runWrangler(wranglerArgs);
+  const parsed = takeOption(args, ["--token"]);
+  if (parsed.args.length) throw new Error("Usage: pagedrop login [--token <token>]");
+  let token = parsed.value;
+  if (!token) {
+    if (process.stdin.isTTY) {
+      console.error(`Create a Cloudflare API token with the "Workers R2 Storage: Edit" permission:`);
+      console.error(`  ${TOKEN_URL}`);
+    }
+    token = await readSecret("Cloudflare API token (hidden): ");
+  }
+  if (!token) throw new Error("No token was provided");
+  const saved = await saveToken(token);
+  console.log(`${saved.replaced ? "Updated" : "Saved"} ${TOKEN_KEY} in ${saved.path}`);
+  if (saved.insecure) {
+    console.error(`Warning: ${saved.path} is readable by other users (mode ${saved.mode.toString(8).padStart(3, "0")}); run \`chmod 600 ${saved.path}\``);
+  }
+  console.log("Next: pagedrop setup");
 }
 
 function selectAccount(found, requested) {
@@ -77,8 +95,20 @@ function selectAccount(found, requested) {
     return match;
   }
   if (found.length === 1) return found[0];
-  if (found.length === 0) throw new Error("No Cloudflare accounts found; run `pagedrop login`");
+  if (found.length === 0) throw new Error("No Cloudflare accounts found; check the API token from `pagedrop login`");
   throw new Error(`More than one Cloudflare account is available. Re-run with --account <id>: ${found.map((item) => `${item.name || "unnamed"} (${item.id})`).join(", ")}`);
+}
+
+// A token scoped to one account may be denied the account list, so an explicit
+// account ID is accepted without it.
+async function resolveAccount(requested) {
+  try {
+    return selectAccount(await new CloudflareR2({}).accounts(), requested);
+  } catch (error) {
+    if (error.status && /^[0-9a-f]{32}$/i.test(requested || "")) return { id: requested };
+    if (error.status) throw new Error(`${error.message}. Re-run with --account <id> if the API token cannot list accounts`);
+    throw error;
+  }
 }
 
 async function setup(args) {
@@ -92,7 +122,7 @@ async function setup(args) {
   const jurisdiction = parsed.value;
   if (parsed.args.length) throw new Error("Usage: pagedrop setup [--account <id>] [--bucket <name>] [--public-base-url <url>] [--jurisdiction <value>]");
 
-  const chosen = selectAccount(await accounts(), account);
+  const chosen = await resolveAccount(account || await configuredAccountId());
   const draft = { accountId: chosen.id, bucket, publicBaseUrl: requestedBaseUrl || "https://pending.invalid", jurisdiction };
   validateConfig(draft, "setup options");
   const client = new CloudflareR2(draft);
@@ -119,11 +149,24 @@ async function status(args) {
   const common = parseCommon(args);
   if (common.args.length) throw new Error("Usage: pagedrop status [--json]");
   const config = await readConfig(process.env, { required: false });
+  let token = null;
   let authenticated = false;
-  try { await authHeaders(); authenticated = true; } catch {}
-  const result = { authenticated, configured: Boolean(config.accountId && config.bucket && config.publicBaseUrl), configPath: configPath(), ...config };
+  let problem;
+  try {
+    const found = await apiToken();
+    token = { key: found.key, source: found.source, insecure: found.insecure };
+    authenticated = await new CloudflareR2(config).verifyToken();
+    if (!authenticated) problem = "Cloudflare reports the API token is not active";
+  } catch (error) {
+    problem = error.message;
+  }
+  const result = { authenticated, token, tokenFile: tokenFile(), configured: Boolean(config.accountId && config.bucket && config.publicBaseUrl), configPath: configPath(), ...config };
+  if (problem) result.error = problem;
   if (common.json) return output(result, true);
   console.log(`Authenticated: ${authenticated ? "yes" : "no"}`);
+  console.log(`Token: ${token ? `${token.key} from ${token.source}` : `none; run \`pagedrop login\` or set ${TOKEN_KEY} in ${tokenFile()}`}`);
+  if (token?.insecure) console.log(`Warning: ${token.source} is readable by other users; run \`chmod 600 ${token.source}\``);
+  if (problem && token) console.log(`Problem: ${problem}`);
   console.log(`Configured: ${result.configured ? "yes" : "no"}`);
   console.log(`Config: ${result.configPath}`);
   if (result.configured) {
@@ -249,8 +292,13 @@ async function skill(args) {
 
 async function logout(args) {
   const yes = takeOption(args, ["--yes"], { boolean: true });
-  if (yes.args.length || !yes.value) throw new Error("This logs Wrangler out for every tool that shares its session. Re-run as `pagedrop logout --yes`");
-  await runWrangler(["logout"]);
+  if (yes.args.length || !yes.value) throw new Error(`This removes ${TOKEN_KEY} from ${tokenFile()}. Re-run as \`pagedrop logout --yes\``);
+  const cleared = await removeToken();
+  console.log(cleared.length ? `Removed ${TOKEN_KEY} from ${cleared.join(", ")}` : `No ${TOKEN_KEY} entry was found in ${tokenFile()}`);
+  let remaining;
+  try { remaining = await apiToken(); } catch {}
+  if (remaining) console.log(`Still authenticated by ${remaining.key} from ${remaining.source}; Cloudflare was not asked to revoke any token.`);
+  else console.log(`Revoke the token itself at ${TOKEN_URL}`);
 }
 
 export async function run(rawArgs) {

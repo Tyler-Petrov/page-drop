@@ -1,23 +1,26 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import test from "node:test";
-import { applyEdits } from "./src/edits.js";
+import { apiToken, authHeaders, removeToken, saveToken } from "./src/auth.js";
 import { validateConfig } from "./src/config.js";
+import { applyEdits } from "./src/edits.js";
 import { installSkill } from "./src/skill.js";
-import { accounts, authHeaders } from "./src/wrangler.js";
 
 const execute = promisify(execFile);
 const cli = join(import.meta.dirname, "bin", "pagedrop.js");
+const EMPTY_HOME = join(tmpdir(), "page-drop-empty-home");
+await mkdir(EMPTY_HOME, { recursive: true });
 
+// Never let the developer's real token or home ~/.env leak into a test run.
 function isolatedEnv(overrides = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PAGE_DROP_")));
-  return { ...env, ...overrides };
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => !key.startsWith("PAGE_DROP_") && !key.startsWith("CLOUDFLARE_")));
+  return { ...env, HOME: EMPTY_HOME, USERPROFILE: EMPTY_HOME, ...overrides };
 }
 
 async function executeWithInput(args, { env, input, timeout = 30_000 }) {
@@ -49,26 +52,31 @@ function ok(response, result, extra = {}) {
   response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
 }
 
-async function uploadedFile(request, url) {
-  const webRequest = new Request(url, {
-    method: request.method,
-    headers: request.headers,
-    body: Readable.toWeb(request),
-    duplex: "half",
-  });
-  const form = await webRequest.formData();
-  const file = form.get("body");
-  return { body: Buffer.from(await file.arrayBuffer()), type: file.type || "application/octet-stream" };
+// Mirrors the real R2 management API: the raw request body is the object and
+// Content-Type carries its type. It rejects multipart/form-data, so accepting
+// a form here would let a broken upload path pass the suite.
+async function uploadedFile(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return { body: Buffer.concat(chunks), type: request.headers["content-type"] || "application/octet-stream" };
 }
 
 test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes", async (context) => {
   const objects = new Map();
+  const seenAuthorization = new Set();
   let bucketExists = false;
   let bucketCreates = 0;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
     const objectPrefix = "/client/v4/accounts/test-account/r2/buckets/page-drop/objects/";
+    seenAuthorization.add(request.headers.authorization);
 
+    if (request.method === "GET" && url.pathname.endsWith("/user/tokens/verify")) {
+      return ok(response, { id: "token-id", status: "active" });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/client/v4/accounts")) {
+      return ok(response, [{ id: "test-account", name: "Test" }]);
+    }
     if (request.method === "GET" && url.pathname.endsWith("/r2/buckets/page-drop")) {
       if (bucketExists) return ok(response, { name: "page-drop" });
       response.writeHead(404);
@@ -94,7 +102,7 @@ test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes",
         return response.end(value.body);
       }
       if (request.method === "PUT") {
-        const file = await uploadedFile(request, url);
+        const file = await uploadedFile(request);
         const etag = `etag-${objects.size + file.body.length}`;
         objects.set(key, { ...file, etag });
         return ok(response, { key, size: String(file.body.length), etag });
@@ -113,23 +121,20 @@ test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes",
   const directory = await mkdtemp(join(tmpdir(), "page-drop-test-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const config = join(directory, "config.json");
-  const wrangler = join(directory, "fake-wrangler.mjs");
+  const home = join(directory, "home");
   const firstPage = join(directory, "first.html");
   const report = join(directory, "report.pdf");
   const downloaded = join(directory, "downloaded.pdf");
-  await writeFile(wrangler, `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args[0] === "auth" && args[1] === "token") console.log(JSON.stringify({type:"oauth",token:"test-token"}));
-else if (args[0] === "whoami") console.log(JSON.stringify({accounts:[{id:"test-account",name:"Test"}]}));
-else process.exit(0);
-`);
-  await chmod(wrangler, 0o755);
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, ".env"), "UNRELATED=value\nPAGE_DROP_API_TOKEN=from-dot-env\n");
+  await writeFile(join(home, ".env.local"), "PAGE_DROP_API_TOKEN=test-token\n");
   await writeFile(firstPage, "<main><h1>First</h1></main>");
   await writeFile(report, Buffer.from([0x25, 0x50, 0x44, 0x46]));
 
   const env = isolatedEnv({
+    HOME: home,
+    USERPROFILE: home,
     PAGE_DROP_CONFIG: config,
-    PAGE_DROP_WRANGLER_BIN: wrangler,
     PAGE_DROP_API_BASE: `http://127.0.0.1:${server.address().port}/client/v4`,
   });
   const run = (...args) => execute(process.execPath, [cli, ...args], { env, timeout: 30_000 });
@@ -147,6 +152,10 @@ else process.exit(0);
   const status = JSON.parse((await run("status", "--json")).stdout);
   assert.equal(status.authenticated, true);
   assert.equal(status.configured, true);
+  assert.deepEqual(status.token, { key: "PAGE_DROP_API_TOKEN", source: join(home, ".env.local"), insecure: true });
+  assert.equal(JSON.stringify(status).includes("test-token"), false);
+  // ~/.env.local wins over ~/.env, and the token reaches Cloudflare as a bearer token.
+  assert.deepEqual([...seenAuthorization], ["Bearer test-token"]);
 
   const created = await run("publish", firstPage, "pages/example.html");
   assert.match(created.stdout, /Created: pages\/example\.html/);
@@ -216,29 +225,124 @@ test("refuses likely secret files", async (context) => {
   assert.match(result.stderr, /Refusing to upload likely secret file/);
 });
 
-test("login and logout proxy the pinned Wrangler with explicit safeguards", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "page-drop-auth-"));
-  context.after(() => rm(directory, { recursive: true, force: true }));
-  const wrangler = join(directory, "fake-wrangler.mjs");
-  const log = join(directory, "wrangler.log");
-  await writeFile(wrangler, `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
-appendFileSync(process.env.PAGE_DROP_WRANGLER_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
-`);
-  await chmod(wrangler, 0o755);
-  const env = isolatedEnv({ PAGE_DROP_WRANGLER_BIN: wrangler, PAGE_DROP_WRANGLER_LOG: log });
+test("login stores the token in the home env file and logout removes it", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "page-drop-auth-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const local = join(home, ".env.local");
+  await writeFile(local, "EDITOR=vi\nPAGE_DROP_API_TOKEN=stale-token\nOTHER=keep\n");
+  await chmod(local, 0o644);
+  const env = isolatedEnv({ HOME: home, USERPROFILE: home });
   const run = (...args) => execute(process.execPath, [cli, ...args], { env, timeout: 30_000 });
 
-  await run("login", "--device");
-  const refused = await run("logout").then(() => null, (error) => error);
-  assert.match(refused.stderr, /logs Wrangler out for every tool/);
-  await run("logout", "--yes");
+  const saved = await run("login", "--token", "fresh-token");
+  assert.match(saved.stdout, /Updated PAGE_DROP_API_TOKEN/);
+  // Unrelated assignments survive and the token is replaced in place, not appended.
+  assert.equal(await readFile(local, "utf8"), "EDITOR=vi\nPAGE_DROP_API_TOKEN=fresh-token\nOTHER=keep\n");
+  // An already world-readable file is tightened rather than left exposed.
+  assert.equal((await stat(local)).mode & 0o777, 0o600);
 
-  const calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(calls, [
-    ["login", "--use-keyring", "--scopes", "account:read", "user:read", "workers:write", "--device"],
-    ["logout"],
-  ]);
+  const piped = await executeWithInput(["login"], { env, input: "piped-token\n" });
+  assert.match(piped.stdout, /Updated PAGE_DROP_API_TOKEN/);
+  assert.match(await readFile(local, "utf8"), /^PAGE_DROP_API_TOKEN=piped-token$/m);
+
+  const refused = await run("logout").then(() => null, (error) => error);
+  assert.match(refused.stderr, /removes PAGE_DROP_API_TOKEN/);
+  assert.match(await readFile(local, "utf8"), /piped-token/);
+
+  const out = await run("logout", "--yes");
+  assert.match(out.stdout, /Removed PAGE_DROP_API_TOKEN/);
+  assert.equal(await readFile(local, "utf8"), "EDITOR=vi\nOTHER=keep\n");
+  assert.match((await run("logout", "--yes")).stdout, /No PAGE_DROP_API_TOKEN entry/);
+  assert.match((await run("status")).stdout, /Authenticated: no/);
+});
+
+test("login creates a private env file and refuses an implausible token", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "page-drop-auth-new-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const env = isolatedEnv({ HOME: home, USERPROFILE: home });
+  const run = (...args) => execute(process.execPath, [cli, ...args], { env, timeout: 30_000 });
+
+  const rejected = await run("login", "--token", "not a token").then(() => null, (error) => error);
+  assert.match(rejected.stderr, /does not look like a Cloudflare API token/);
+  await assert.rejects(readFile(join(home, ".env.local")), { code: "ENOENT" });
+
+  const saved = await run("login", "--token", "brand-new-token");
+  assert.match(saved.stdout, /Saved PAGE_DROP_API_TOKEN/);
+  const created = await stat(join(home, ".env.local"));
+  assert.equal(created.mode & 0o777, 0o600);
+});
+
+test("tokens resolve from the environment, then ~/.env, then ~/.env.local", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "page-drop-token-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const base = isolatedEnv({ HOME: home, USERPROFILE: home });
+
+  await assert.rejects(apiToken(base), /No Cloudflare API token found/);
+
+  await writeFile(join(home, ".env"), "PAGE_DROP_API_TOKEN=dot-env-token\n");
+  assert.equal((await apiToken(base)).value, "dot-env-token");
+  assert.equal((await apiToken(base)).source, join(home, ".env"));
+
+  await writeFile(join(home, ".env.local"), "PAGE_DROP_API_TOKEN=dot-env-local\n");
+  assert.equal((await apiToken(base)).value, "dot-env-local");
+
+  assert.deepEqual(await authHeaders({ env: { ...base, PAGE_DROP_API_TOKEN: "from-shell" } }), {
+    Authorization: "Bearer from-shell",
+  });
+
+  // The Cloudflare-wide name is a fallback for both files and the environment.
+  await rm(join(home, ".env"));
+  await writeFile(join(home, ".env.local"), 'CLOUDFLARE_API_TOKEN="quoted-token"\n');
+  await chmod(join(home, ".env.local"), 0o600);
+  assert.deepEqual(await apiToken(base), {
+    key: "CLOUDFLARE_API_TOKEN", value: "quoted-token", source: join(home, ".env.local"), insecure: false,
+  });
+  await chmod(join(home, ".env.local"), 0o644);
+  assert.equal((await apiToken(base)).insecure, true);
+
+  await writeFile(join(home, ".env.local"), "PAGE_DROP_API_TOKEN=has spaces\n");
+  await assert.rejects(apiToken(base), /not a valid Cloudflare API token/);
+
+  // logout only clears the Page Drop key, leaving other tools' tokens alone.
+  await writeFile(join(home, ".env.local"), "CLOUDFLARE_API_TOKEN=shared-token\nexport PAGE_DROP_API_TOKEN=mine\n");
+  assert.deepEqual(await removeToken(base), [join(home, ".env.local")]);
+  assert.equal(await readFile(join(home, ".env.local"), "utf8"), "CLOUDFLARE_API_TOKEN=shared-token\n");
+
+  await saveToken("written-token", base);
+  assert.equal(await readFile(join(home, ".env.local"), "utf8"), "CLOUDFLARE_API_TOKEN=shared-token\nPAGE_DROP_API_TOKEN=written-token\n");
+});
+
+test("setup accepts an explicit account when the token cannot list accounts", async (context) => {
+  const account = "0123456789abcdef0123456789abcdef";
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://localhost");
+    if (url.pathname.endsWith("/client/v4/accounts")) {
+      response.writeHead(403, { "Content-Type": "application/json" });
+      return response.end(JSON.stringify({ success: false, errors: [{ message: "Unauthorized to access requested resource" }] }));
+    }
+    if (request.method === "GET" && url.pathname.endsWith(`/accounts/${account}/r2/buckets/page-drop`)) return ok(response, { name: "page-drop" });
+    if (request.method === "PUT" && url.pathname.endsWith("/domains/managed")) return ok(response, { domain: "pub-scoped.r2.dev", enabled: true });
+    response.writeHead(404);
+    response.end(JSON.stringify({ success: false, errors: [{ message: "unknown test route" }] }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => server.close());
+
+  const directory = await mkdtemp(join(tmpdir(), "page-drop-scoped-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const env = isolatedEnv({
+    PAGE_DROP_CONFIG: join(directory, "config.json"),
+    PAGE_DROP_API_TOKEN: "scoped-token",
+    PAGE_DROP_API_BASE: `http://127.0.0.1:${server.address().port}/client/v4`,
+  });
+  const run = (...args) => execute(process.execPath, [cli, ...args], { env, timeout: 30_000 });
+
+  const failed = await run("setup").then(() => null, (error) => error);
+  assert.match(failed.stderr, /Re-run with --account <id>/);
+
+  const setup = await run("setup", "--account", account);
+  assert.match(setup.stdout, /Using existing bucket: page-drop/);
+  assert.equal(JSON.parse(await readFile(join(directory, "config.json"), "utf8")).accountId, account);
 });
 
 test("edit operations are sequential and enforce match counts", () => {
@@ -255,29 +359,6 @@ test("configuration requires a complete HTTPS public URL", () => {
   assert.doesNotThrow(() => validateConfig({ ...base, publicBaseUrl: "https://files.example.com/path" }));
   assert.throws(() => validateConfig({ ...base, publicBaseUrl: "https://" }), /absolute HTTPS URL/);
   assert.throws(() => validateConfig({ ...base, publicBaseUrl: "http://files.example.com" }), /absolute HTTPS URL/);
-});
-
-test("Wrangler response parsing rejects incomplete auth and uses membership fallback", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "page-drop-wrangler-response-"));
-  context.after(() => rm(directory, { recursive: true, force: true }));
-  const wrangler = join(directory, "fake-wrangler.mjs");
-  await writeFile(wrangler, `#!/usr/bin/env node
-console.log(process.env.FAKE_WRANGLER_OUTPUT);
-`);
-  await chmod(wrangler, 0o755);
-
-  const baseEnv = isolatedEnv({ PAGE_DROP_WRANGLER_BIN: wrangler });
-  await assert.rejects(authHeaders({ env: { ...baseEnv, FAKE_WRANGLER_OUTPUT: JSON.stringify({ type: "oauth", token: "" }) } }), /unsupported authentication method/);
-  assert.deepEqual(await accounts({
-    env: {
-      ...baseEnv,
-      FAKE_WRANGLER_OUTPUT: JSON.stringify({
-        accounts: [],
-        memberships: [null, "invalid", {}, { account: { id: "fallback", name: "Fallback" } }],
-      }),
-    },
-  }), [{ id: "fallback", name: "Fallback" }]);
-  await assert.rejects(accounts({ env: { ...baseEnv, FAKE_WRANGLER_OUTPUT: JSON.stringify({ loggedIn: true }) } }), /no accounts or memberships array/);
 });
 
 test("skill installer copies only the portable skill bundle", async (context) => {
