@@ -230,7 +230,7 @@ test("login stores the token in the home env file and logout removes it", async 
   context.after(() => rm(home, { recursive: true, force: true }));
   const local = join(home, ".env.local");
   await writeFile(local, "EDITOR=vi\nPAGE_DROP_API_TOKEN=stale-token\nOTHER=keep\n");
-  await chmod(local, 0o600);
+  await chmod(local, 0o644);
   const env = isolatedEnv({ HOME: home, USERPROFILE: home });
   const run = (...args) => execute(process.execPath, [cli, ...args], { env, timeout: 30_000 });
 
@@ -238,6 +238,8 @@ test("login stores the token in the home env file and logout removes it", async 
   assert.match(saved.stdout, /Updated PAGE_DROP_API_TOKEN/);
   // Unrelated assignments survive and the token is replaced in place, not appended.
   assert.equal(await readFile(local, "utf8"), "EDITOR=vi\nPAGE_DROP_API_TOKEN=fresh-token\nOTHER=keep\n");
+  // An already world-readable file is tightened rather than left exposed.
+  assert.equal((await stat(local)).mode & 0o777, 0o600);
 
   const piped = await executeWithInput(["login"], { env, input: "piped-token\n" });
   assert.match(piped.stdout, /Updated PAGE_DROP_API_TOKEN/);

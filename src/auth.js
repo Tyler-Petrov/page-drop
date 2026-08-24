@@ -117,8 +117,12 @@ export async function saveToken(token, env = process.env) {
     lines.push(line);
   }
 
+  // writeFile's mode applies only to a file it creates, so an existing
+  // world-readable file keeps its permissions. Tighten it before the token
+  // lands in it, not after, and report anything still loose to the caller.
+  if (existing !== null) await chmod(path, 0o600).catch(() => {});
   await writeFile(path, `${lines.join("\n").replace(/\n+$/, "")}\n`, { mode: 0o600 });
-  if (existing === null) await chmod(path, 0o600).catch(() => {});
+  await chmod(path, 0o600).catch(() => {});
   return { path, replaced, ...(await permissions(path)) };
 }
 
