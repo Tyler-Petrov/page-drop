@@ -140,11 +140,12 @@ export class CloudflareR2 {
   }
 
   async put(key, body, { contentType = "application/octet-stream" } = {}) {
-    // Cloudflare's R2 management API expects the object in a multipart field
-    // named "body". This differs from the S3-compatible API's raw PUT body.
-    const form = new FormData();
-    form.append("body", new Blob([body], { type: contentType }), key.split("/").at(-1));
-    return this.request(this.bucketUrl(`/objects/${objectPart(key)}`), { method: "PUT", body: form });
+    // The R2 management API takes the raw object as the request body and reads
+    // its type from the Content-Type header. It rejects multipart/form-data
+    // with "multipart/form-data enhancement not implemented" (code 10028).
+    return this.request(this.bucketUrl(`/objects/${objectPart(key)}`), {
+      method: "PUT", headers: { "Content-Type": contentType }, body,
+    });
   }
 
   async delete(key) {

@@ -4,7 +4,6 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import test from "node:test";
 import { apiToken, authHeaders, removeToken, saveToken } from "./src/auth.js";
@@ -53,16 +52,13 @@ function ok(response, result, extra = {}) {
   response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
 }
 
-async function uploadedFile(request, url) {
-  const webRequest = new Request(url, {
-    method: request.method,
-    headers: request.headers,
-    body: Readable.toWeb(request),
-    duplex: "half",
-  });
-  const form = await webRequest.formData();
-  const file = form.get("body");
-  return { body: Buffer.from(await file.arrayBuffer()), type: file.type || "application/octet-stream" };
+// Mirrors the real R2 management API: the raw request body is the object and
+// Content-Type carries its type. It rejects multipart/form-data, so accepting
+// a form here would let a broken upload path pass the suite.
+async function uploadedFile(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return { body: Buffer.concat(chunks), type: request.headers["content-type"] || "application/octet-stream" };
 }
 
 test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes", async (context) => {
@@ -106,7 +102,7 @@ test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes",
         return response.end(value.body);
       }
       if (request.method === "PUT") {
-        const file = await uploadedFile(request, url);
+        const file = await uploadedFile(request);
         const etag = `etag-${objects.size + file.body.length}`;
         objects.set(key, { ...file, etag });
         return ok(response, { key, size: String(file.body.length), etag });
