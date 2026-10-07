@@ -119,7 +119,7 @@ Keep the file private: `chmod 600 ~/.env.local`. `pagedrop status` warns when th
 
 Every upload needs a key, and keys have no file extension. `pagedrop publish pricing.html pricing` is served at `https://<public-url>/pricing`; the stored Content-Type tells the browser it is HTML. A key ending in a recognized extension such as `.html` or `.pdf` is rejected with the extension-free name to use instead. Keys may contain path-like slashes.
 
-Pass `--random` instead of a key for an unguessable 128-bit name when the link should stay unlisted. Uploading to a key that already exists fails unless you pass `--replace`.
+Pass `--random` instead of a key for an unguessable 128-bit name when the link should stay unlisted. Uploading to a key that already exists fails unless you pass `--replace`. The check runs before the upload as a separate request, so two uploads to the same key at the same moment can both pass it.
 
 ## Updating Without A Local Checkout
 

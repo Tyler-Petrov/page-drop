@@ -206,6 +206,7 @@ async function upload(command, args) {
   const key = random ? randomKey() : validateUploadKey(namedKey);
   const config = await readConfig();
   const client = new CloudflareR2(config);
+  // Best-effort: exists and put are separate requests, so concurrent uploads to one key can both pass.
   const existed = await client.exists(key);
   if (existed && !replace) throw new Error(`${key} already exists; pass --replace to overwrite it`);
   const body = await readInput(file);
