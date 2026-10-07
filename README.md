@@ -105,8 +105,8 @@ Keep the file private: `chmod 600 ~/.env.local`. `pagedrop status` warns when th
 | `pagedrop login [--token <token>]` | Stores a Cloudflare API token as `PAGE_DROP_API_TOKEN` in `~/.env.local`. Prompts without echo, or reads the token from stdin. |
 | `pagedrop setup` | Selects an account, creates or reuses a bucket, enables its `r2.dev` public address, and writes non-secret config. |
 | `pagedrop status [--json]` | Reports which variable and file supplied the token, whether Cloudflare still accepts it, and whether Page Drop is configured. It never prints the token. |
-| `pagedrop publish <html\|-> [key] [--key <key>]` | Uploads HTML from a file or stdin with an HTML content type. |
-| `pagedrop put <file\|-> [key] [--key <key>]` | Uploads any single file and infers its MIME type. Use `--content-type` for stdin or an override. |
+| `pagedrop publish <file\|-> <key\|--random> [--replace]` | Uploads one file and infers its content type from the file's extension. Stdin is treated as HTML. |
+| `pagedrop put <file\|-> <key\|--random> [--replace]` | Same as `publish`, except stdin requires `--content-type`. |
 | `pagedrop list [--json]` | Lists remote object keys, sizes, and public URLs. |
 | `pagedrop get <key> [--output <file>]` | Downloads a remote object to stdout or writes the requested output file. |
 | `pagedrop inspect <key> [--match <text>]` | Reads remote text and optionally prints only matching lines with context. |
@@ -115,16 +115,18 @@ Keep the file private: `chmod 600 ~/.env.local`. `pagedrop status` warns when th
 | `pagedrop skill install` | Installs or updates the packaged skill in the shared cross-agent skill directory. |
 | `pagedrop logout --yes` | Removes the `PAGE_DROP_API_TOKEN` line from `~/.env` and `~/.env.local`. It does not revoke the token at Cloudflare. |
 
-`pagedrop page.html pages/example.html` remains a shorthand for `pagedrop publish page.html --key pages/example.html`.
+`pagedrop page.html pages/example` remains a shorthand for `pagedrop publish page.html pages/example`.
 
-Keys may contain path-like slashes. When no key is supplied, Page Drop creates a random 128-bit name and preserves the source extension.
+Every upload needs a key, and keys have no file extension. `pagedrop publish pricing.html pricing` is served at `https://<public-url>/pricing`; the stored Content-Type tells the browser it is HTML. A key ending in a recognized extension such as `.html` or `.pdf` is rejected with the extension-free name to use instead. Keys may contain path-like slashes.
+
+Pass `--random` instead of a key for an unguessable 128-bit name when the link should stay unlisted. Uploading to a key that already exists fails unless you pass `--replace`. The check runs before the upload as a separate request, so two uploads to the same key at the same moment can both pass it.
 
 ## Updating Without A Local Checkout
 
 Inspect a relevant section:
 
 ```bash
-pagedrop inspect pages/example.html --match "Pricing" --context 3
+pagedrop inspect pages/example --match "Pricing" --context 3
 ```
 
 Apply exact text operations from stdin:
@@ -133,7 +135,7 @@ Apply exact text operations from stdin:
 printf '%s' '[
   {"op":"replace","old":"Starter — $10","value":"Starter — $12"},
   {"op":"insert_after","old":"</main>","value":"<footer>Updated today</footer>"}
-]' | pagedrop update pages/example.html --edits -
+]' | pagedrop update pages/example --edits -
 ```
 
 Supported operations:
@@ -150,7 +152,7 @@ The single-target operations expect exactly one match. Add `expectedMatches` to 
 Preview the resulting patch:
 
 ```bash
-pagedrop update pages/example.html --edits edits.json --dry-run
+pagedrop update pages/example --edits edits.json --dry-run
 ```
 
 Structured updates work only for text content. Replace a binary file with `pagedrop put`.
