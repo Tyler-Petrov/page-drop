@@ -115,7 +115,7 @@ Keep the file private: `chmod 600 ~/.env.local`. `pagedrop status` warns when th
 | `pagedrop skill install` | Installs or updates the packaged skill in the shared cross-agent skill directory. |
 | `pagedrop logout --yes` | Removes the `PAGE_DROP_API_TOKEN` line from `~/.env` and `~/.env.local`. It does not revoke the token at Cloudflare. |
 
-`pagedrop page.html pages/example` remains a shorthand for `pagedrop publish page.html --key pages/example`.
+`pagedrop page.html pages/example` remains a shorthand for `pagedrop publish page.html pages/example`.
 
 Every upload needs a key, and keys have no file extension. `pagedrop publish pricing.html pricing` is served at `https://<public-url>/pricing`; the stored Content-Type tells the browser it is HTML. A key ending in a recognized extension such as `.html` or `.pdf` is rejected with the extension-free name to use instead. Keys may contain path-like slashes.
 

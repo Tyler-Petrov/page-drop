@@ -204,12 +204,12 @@ async function upload(command, args) {
   if (file === "-" && command === "put" && !explicitType) throw new Error("Pass --content-type when uploading from stdin with put");
   assertSafeFile(file, allowSensitive);
   const key = random ? randomKey() : validateUploadKey(namedKey);
-  const body = await readInput(file);
-  const type = contentType(file, explicitType, command === "publish" ? "text/html; charset=utf-8" : undefined);
   const config = await readConfig();
   const client = new CloudflareR2(config);
   const existed = await client.exists(key);
   if (existed && !replace) throw new Error(`${key} already exists; pass --replace to overwrite it`);
+  const body = await readInput(file);
+  const type = contentType(file, explicitType, command === "publish" ? "text/html; charset=utf-8" : undefined);
   const response = await client.put(key, body, { contentType: type });
   const result = { action: existed ? "updated" : "created", key, url: publicUrl(config.publicBaseUrl, key), size: body.length, contentType: type, etag: response.result?.etag };
   if (json) return output(result, true);
