@@ -22,16 +22,23 @@ export function publicUrl(baseUrl, key) {
   return `${baseUrl.replace(/\/$/, "")}/${key.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-export function generatedKey(file = "") {
-  const extension = file === "-" ? "" : extname(file).toLowerCase();
-  return `${randomBytes(16).toString("hex")}${extension}`;
+// Public URLs carry no file extension; the stored Content-Type tells clients what the object is.
+export function validateUploadKey(key) {
+  validateKey(key);
+  const name = key.split("/").at(-1);
+  const extension = extname(name);
+  if (extension && lookup(name)) throw new Error(`Keys are served without a file extension; use ${key.slice(0, -extension.length)} instead of ${key}`);
+  return key;
 }
 
-export function contentType(file, explicit, html = false) {
+export function randomKey() {
+  return randomBytes(16).toString("hex");
+}
+
+export function contentType(file, explicit, fallback = "application/octet-stream") {
   if (explicit) return explicit;
-  if (html) return "text/html; charset=utf-8";
   const type = file !== "-" && lookup(file);
-  if (!type) return "application/octet-stream";
+  if (!type) return fallback;
   const encoding = charset(type);
   return encoding ? `${type}; charset=${String(encoding).toLowerCase()}` : type;
 }

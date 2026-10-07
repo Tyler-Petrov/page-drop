@@ -157,60 +157,83 @@ test("sets up, publishes arbitrary files, edits text, lists, gets, and deletes",
   // ~/.env.local wins over ~/.env, and the token reaches Cloudflare as a bearer token.
   assert.deepEqual([...seenAuthorization], ["Bearer test-token"]);
 
-  const created = await run("publish", firstPage, "pages/example.html");
-  assert.match(created.stdout, /Created: pages\/example\.html/);
-  assert.equal(objects.get("pages/example.html").body.toString(), "<main><h1>First</h1></main>");
-  assert.equal(objects.get("pages/example.html").type, "text/html; charset=utf-8");
+  const created = await run("publish", firstPage, "pages/example");
+  assert.match(created.stdout, /Created: pages\/example/);
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>First</h1></main>");
+  assert.equal(objects.get("pages/example").type, "text/html; charset=utf-8");
 
-  const generated = await run("publish", firstPage, "--json");
+  const fails = (promise) => promise.then(() => assert.fail("expected the CLI to fail"), (error) => error.stderr);
+  assert.match(await fails(run("publish", firstPage)), /Usage: pagedrop publish <file\|-> <key\|--random>/);
+  assert.match(await fails(run("publish", firstPage, "pages/other.html")), /use pages\/other instead of pages\/other\.html/);
+  assert.match(await fails(run("publish", firstPage, "pages/other", "--random")), /Specify a key or --random, not both/);
+  assert.match(await fails(run("publish", firstPage, "pages/example")), /pages\/example already exists; pass --replace/);
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>First</h1></main>");
+  assert.match(await fails(executeWithInput(["put", "-", "notes"], { env, input: "hi" })), /Pass --content-type/);
+  assert.equal(objects.has("notes"), false);
+
+  const replaced = await run("publish", firstPage, "--key", "pages/example", "--replace");
+  assert.match(replaced.stdout, /Updated: pages\/example/);
+
+  const piped = await executeWithInput(["publish", "-", "pages/piped"], { env, input: "<p>piped</p>" });
+  assert.match(piped.stdout, /URL: https:\/\/pub-test\.r2\.dev\/pages\/piped\n/);
+  assert.equal(objects.get("pages/piped").type, "text/html; charset=utf-8");
+  await run("delete", "pages/piped", "--yes");
+
+  // A version-like suffix is not a file extension, so it stays part of the key.
+  await run("put", report, "reports/v1.2");
+  assert.equal(objects.get("reports/v1.2").type, "application/pdf");
+  await run("delete", "reports/v1.2", "--yes");
+
+  const generated = await run("publish", firstPage, "--random", "--json");
   const generatedResult = JSON.parse(generated.stdout);
-  assert.match(generatedResult.key, /^[a-f0-9]{32}\.html$/);
-  assert.equal(objects.has(generatedResult.key), true);
+  assert.match(generatedResult.key, /^[a-f0-9]{32}$/);
+  assert.equal(objects.get(generatedResult.key).type, "text/html; charset=utf-8");
 
-  const binary = await run("put", report, "reports/report.pdf");
-  assert.match(binary.stdout, /Created: reports\/report\.pdf/);
-  assert.deepEqual(objects.get("reports/report.pdf").body, Buffer.from([0x25, 0x50, 0x44, 0x46]));
-  assert.equal(objects.get("reports/report.pdf").type, "application/pdf");
+  // publish infers the type from the source file rather than assuming HTML.
+  const binary = await run("publish", report, "reports/report");
+  assert.match(binary.stdout, /Created: reports\/report/);
+  assert.deepEqual(objects.get("reports/report").body, Buffer.from([0x25, 0x50, 0x44, 0x46]));
+  assert.equal(objects.get("reports/report").type, "application/pdf");
 
-  const inspected = await run("inspect", "pages/example.html", "--match", "First", "--context", "0");
+  const inspected = await run("inspect", "pages/example", "--match", "First", "--context", "0");
   assert.match(inspected.stdout, /<main><h1>First<\/h1><\/main>/);
   assert.match(inspected.stderr, /ETag:/);
 
   const edits = JSON.stringify([{ op: "replace", old: "First", value: "Updated" }]);
-  const updated = await executeWithInput(["update", "pages/example.html", "--edits", "-"], { env, input: edits });
-  assert.match(updated.stdout, /Updated: pages\/example\.html/);
-  assert.equal(objects.get("pages/example.html").body.toString(), "<main><h1>Updated</h1></main>");
+  const updated = await executeWithInput(["update", "pages/example", "--edits", "-"], { env, input: edits });
+  assert.match(updated.stdout, /Updated: pages\/example/);
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>Updated</h1></main>");
 
-  const failed = await executeWithInput(["update", "pages/example.html", "--edits", "-"], {
+  const failed = await executeWithInput(["update", "pages/example", "--edits", "-"], {
     env, input: JSON.stringify([{ op: "replace", old: "missing", value: "bad" }]),
   }).then(() => null, (error) => error);
   assert.match(failed.stderr, /expected 1 match but found 0/);
-  assert.equal(objects.get("pages/example.html").body.toString(), "<main><h1>Updated</h1></main>");
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>Updated</h1></main>");
 
-  const etagFailure = await executeWithInput(["update", "pages/example.html", "--edits", "-", "--if-etag", "stale"], {
+  const etagFailure = await executeWithInput(["update", "pages/example", "--edits", "-", "--if-etag", "stale"], {
     env, input: JSON.stringify([{ op: "replace", old: "Updated", value: "Bad" }]),
   }).then(() => null, (error) => error);
   assert.match(etagFailure.stderr, /ETag mismatch/);
-  assert.equal(objects.get("pages/example.html").body.toString(), "<main><h1>Updated</h1></main>");
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>Updated</h1></main>");
 
-  const dryRun = await executeWithInput(["update", "pages/example.html", "--edits", "-", "--dry-run"], {
+  const dryRun = await executeWithInput(["update", "pages/example", "--edits", "-", "--dry-run"], {
     env, input: JSON.stringify([{ op: "replace", old: "Updated", value: "Preview" }]),
   });
   assert.match(dryRun.stdout, /\+<main><h1>Preview<\/h1><\/main>/);
-  assert.equal(objects.get("pages/example.html").body.toString(), "<main><h1>Updated</h1></main>");
+  assert.equal(objects.get("pages/example").body.toString(), "<main><h1>Updated</h1></main>");
 
   const listed = JSON.parse((await run("list", "--json")).stdout);
-  assert.deepEqual(listed.map((item) => item.key).sort(), [generatedResult.key, "pages/example.html", "reports/report.pdf"].sort());
+  assert.deepEqual(listed.map((item) => item.key).sort(), [generatedResult.key, "pages/example", "reports/report"].sort());
 
-  await run("get", "reports/report.pdf", "--output", downloaded);
+  await run("get", "reports/report", "--output", downloaded);
   assert.deepEqual(await readFile(downloaded), Buffer.from([0x25, 0x50, 0x44, 0x46]));
 
-  const unconfirmedDelete = await run("delete", "pages/example.html").then(() => null, (error) => error);
+  const unconfirmedDelete = await run("delete", "pages/example").then(() => null, (error) => error);
   assert.match(unconfirmedDelete.stderr, /Usage: pagedrop delete/);
-  assert.equal(objects.has("pages/example.html"), true);
+  assert.equal(objects.has("pages/example"), true);
 
-  await run("delete", "pages/example.html", "--yes");
-  assert.equal(objects.has("pages/example.html"), false);
+  await run("delete", "pages/example", "--yes");
+  assert.equal(objects.has("pages/example"), false);
 });
 
 test("refuses likely secret files", async (context) => {
@@ -218,7 +241,7 @@ test("refuses likely secret files", async (context) => {
   context.after(() => rm(directory, { recursive: true, force: true }));
   const secret = join(directory, ".env");
   await writeFile(secret, "TOKEN=public-if-uploaded");
-  const result = await execute(process.execPath, [cli, "put", secret], {
+  const result = await execute(process.execPath, [cli, "put", secret, "env"], {
     env: isolatedEnv({ PAGE_DROP_CONFIG: join(directory, "missing.json") }),
     timeout: 30_000,
   }).then(() => null, (error) => error);

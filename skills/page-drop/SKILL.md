@@ -27,39 +27,39 @@ Then run `pagedrop setup`. If more than one Cloudflare account is available, sho
 
 ## Publish
 
-Publish a standalone HTML document with `publish`:
+Every upload needs a key without a file extension; the URL is `<public-url>/<key>` and the stored content type tells browsers what it is. Publish a standalone HTML document with `publish`:
 
 ```bash
-pagedrop publish page.html --key pages/example.html
+pagedrop publish page.html --key pages/example
 ```
 
 Pipe generated HTML directly when a local working copy is unnecessary:
 
 ```bash
-generate-html | pagedrop publish - --key pages/example.html
+generate-html | pagedrop publish - --key pages/example
 ```
 
-Upload another file type with `put`; Page Drop infers its content type:
+Any other file type works the same way; Page Drop infers its content type from the local file:
 
 ```bash
-pagedrop put report.pdf --key reports/report.pdf
+pagedrop publish report.pdf --key reports/report
 ```
 
-Omit `--key` only when the user wants a new random URL. Report the emitted URL. Never use `--allow-sensitive` unless the user explicitly confirms that the named secret-like file should become public.
+Use `--random` instead of `--key` only when the user wants an unguessable URL. If the key already exists the upload fails; confirm with the user before retrying with `--replace`. Report the emitted URL. Never use `--allow-sensitive` unless the user explicitly confirms that the named secret-like file should become public.
 
 ## Inspect And Update Remote Text
 
 Inspect only the relevant part of a remote text object:
 
 ```bash
-pagedrop inspect pages/example.html --match "Pricing" --context 3
+pagedrop inspect pages/example --match "Pricing" --context 3
 ```
 
 Use `update` to change remote text without keeping a local checkout. Supply a JSON array on stdin. Each operation checks its match count before anything is uploaded:
 
 ```bash
 printf '%s' '[{"op":"replace","old":"Old heading","value":"New heading"}]' \
-  | pagedrop update pages/example.html --edits -
+  | pagedrop update pages/example --edits -
 ```
 
 Supported operations are `replace`, `replace_all`, `delete`, `insert_before`, and `insert_after`. `replace`, `delete`, and inserts require exactly one match by default. Set `expectedMatches` explicitly when another count is intentional. Use `--dry-run` to inspect the patch. `--if-etag` rejects an already-stale download, but it is not an atomic conditional write; another writer can still update the object between the check and upload.
@@ -70,12 +70,12 @@ Replace binary objects with `pagedrop put`; do not structurally edit them.
 
 ```bash
 pagedrop list --json
-pagedrop get pages/example.html
-pagedrop get reports/report.pdf --output report.pdf
+pagedrop get pages/example
+pagedrop get reports/report --output report.pdf
 ```
 
 Before deletion, confirm the exact key with the user, then run:
 
 ```bash
-pagedrop delete pages/example.html --yes
+pagedrop delete pages/example --yes
 ```

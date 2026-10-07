@@ -5,7 +5,7 @@ import { apiToken, configuredAccountId, removeToken, saveToken, TOKEN_KEY, token
 import { CloudflareR2 } from "./cloudflare.js";
 import { configPath, readConfig, validateConfig, writeConfig } from "./config.js";
 import { applyEdits, matchingLines } from "./edits.js";
-import { assertSafeFile, contentType, generatedKey, isTextContentType, publicUrl, readInput, validateKey } from "./files.js";
+import { assertSafeFile, contentType, isTextContentType, publicUrl, randomKey, readInput, validateKey, validateUploadKey } from "./files.js";
 import { readSecret } from "./prompt.js";
 import { installSkill } from "./skill.js";
 
@@ -25,8 +25,8 @@ Setup:
   pagedrop skill install [--target <skills-dir>] [--force]
 
 Files:
-  pagedrop publish <html-file|-> [--key <key>]
-  pagedrop put <file|-> [--key <key>] [--content-type <type>]
+  pagedrop publish <file|-> <key|--random> [--content-type <type>] [--replace]
+  pagedrop put <file|-> <key|--random> [--content-type <type>] [--replace]
   pagedrop list [--json]
   pagedrop get <key> [--output <file>]
   pagedrop inspect <key> [--match <text>] [--context <lines>]
@@ -37,7 +37,12 @@ Page Drop reads a Cloudflare API token from ${TOKEN_KEY} (or CLOUDFLARE_API_TOKE
 in the environment, then ~/.env, then ~/.env.local. Create a token with the
 "Workers R2 Storage: Edit" permission at ${TOKEN_URL}.
 
-The shorthand \`pagedrop <file> [key]\` publishes HTML. Use --allow-sensitive only
+Keys are required and have no file extension: page.html uploaded to "pricing" is
+served at <public-url>/pricing with its content type inferred from page.html.
+--random picks an unguessable key instead. Uploading to an existing key fails
+unless --replace is given. publish treats stdin as HTML; put requires
+--content-type for stdin.
+The shorthand \`pagedrop <file> <key>\` runs publish. Use --allow-sensitive only
 when intentionally making a file such as .env, credentials.json, or a key public.
 --if-etag checks the downloaded version before upload, but it cannot make the
 Cloudflare management API upload atomic with that check.
@@ -183,20 +188,28 @@ async function upload(command, args) {
   const explicitType = parsed.value;
   parsed = takeOption(parsed.args, ["--allow-sensitive"], { boolean: true });
   const allowSensitive = parsed.value;
+  parsed = takeOption(parsed.args, ["--random"], { boolean: true });
+  const random = parsed.value;
+  parsed = takeOption(parsed.args, ["--replace"], { boolean: true });
+  const replace = parsed.value;
   parsed = takeOption(parsed.args, ["--json"], { boolean: true });
   const json = parsed.value;
   const positional = parsed.args;
-  if (positional.length < 1 || positional.length > 2) throw new Error(`Usage: pagedrop ${command} <file|-> [key] [--key <key>]`);
   if (explicitKey && positional[1]) throw new Error("Specify the key positionally or with --key, not both");
+  const namedKey = explicitKey || positional[1];
+  if (random && namedKey) throw new Error("Specify a key or --random, not both");
+  if (positional.length < 1 || positional.length > 2 || !(namedKey || random)) throw new Error(`Usage: pagedrop ${command} <file|-> <key|--random> [--content-type <type>] [--replace]`);
 
   const file = positional[0];
+  if (file === "-" && command === "put" && !explicitType) throw new Error("Pass --content-type when uploading from stdin with put");
   assertSafeFile(file, allowSensitive);
-  const key = validateKey(explicitKey || positional[1] || generatedKey(file));
+  const key = random ? randomKey() : validateUploadKey(namedKey);
   const body = await readInput(file);
-  const type = contentType(file, explicitType, command === "publish");
+  const type = contentType(file, explicitType, command === "publish" ? "text/html; charset=utf-8" : undefined);
   const config = await readConfig();
   const client = new CloudflareR2(config);
   const existed = await client.exists(key);
+  if (existed && !replace) throw new Error(`${key} already exists; pass --replace to overwrite it`);
   const response = await client.put(key, body, { contentType: type });
   const result = { action: existed ? "updated" : "created", key, url: publicUrl(config.publicBaseUrl, key), size: body.length, contentType: type, etag: response.result?.etag };
   if (json) return output(result, true);
